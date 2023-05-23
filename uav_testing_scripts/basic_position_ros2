@@ -1,0 +1,334 @@
+# !!! Ensure the px4 param COM_RCL_EXCEPT is set to 5 in QGC
+# NAV_RCL_ACT is disabled
+# COM_RC_IN_MODE no checks
+
+# Basic position control
+# Velocity may be controlled by sequencing the setpoints at a fixed position based on the rosrate
+# Currently, velocity mode does not check if the the drone reaches the set position but contionusly sends the following waypoint to get the drone to try to accelerate to the desired velocity
+
+# from zipfile import ZIP_MAX_COMMENT
+import rclpy
+from rclpy.node import Node
+import mavros
+import math
+from geometry_msgs.msg import PoseStamped
+from mavros_msgs.msg import State , PositionTarget
+from mavros_msgs.srv import CommandBool, SetMode
+from nav_msgs.msg import Odometry
+from std_msgs.msg import Int32, Float32 # Lap counter
+import numpy as np
+
+# drone_name = os.getenv('DRONE_NAME') #environment variable set in bashrc(or exported in terminal)
+drone_name = "uav3"
+
+local_pos_topic=drone_name+'/mavros/setpoint_position/local'
+local_vel_topic=drone_name+'/mavros/setpoint_raw/local'
+drone_pos_topic= drone_name+'/mavros/local_position/odom'
+
+lap_topic=drone_name+"/lap"
+velocity_topic=drone_name+"/velocity"
+
+velocity = 1 # leave 0 for position mode, position will be automatically determined by px4 based on distance to next setpoint and rate
+shape = "Square" # Square, Circle, Inclined Square, Line, Figure8, Pattern(Velocity Dependent), Waypoints(Velocity Independent, has to wait for waypoint to reach) 
+radius = 1.0
+altitude = 1.5 # default altitude to hover at
+altitude2 = 1 # secondary altitude for inclined square
+pattern_array = [[0,0,1],[2,0,1],[2,2,1],[0,1,1],[0,0,1]] # The waypoints to go to
+
+z_vel=0.2 # m/s
+wait_for_start = 0 # Waits for drone to get into first position before continuing
+wait=0 # Set to 1 if the drone should hit the setpoint first before moving
+tolerance=0.1 # Drone is considered to have hit setpoint if within this distance of setpoint
+
+rate=15 #hz
+
+mavros.set_namespace()
+
+class drone(Node):
+
+    def __init__(self):
+
+        global wait_for_start, wait
+
+        self.rate = self.Rate(rate)
+
+        self.drone_position = Odometry() #callback data is saved here
+        self.Subscriber(drone_pos_topic, Odometry , self.positioncallback)
+
+        self.local_pos_pub = self.Publisher( PoseStamped, local_pos_topic, 10) # Position Publisher
+        self.local_vel_pub = self.Publisher( PositionTarget, local_vel_topic, 10) # Position and Velocity Publisher
+
+        self.lap = self.Publisher(Int32, lap_topic, 10)
+        self.lapcounter = 0
+
+        self.velocity_pub = self.Publisher(Float32, velocity_topic, 10)
+        self.velocity_pub.publish(velocity)
+
+        if shape != "Waypoints":
+            self.traj_arr = self.generatetrajectory(shape,radius,velocity,altitude=altitude,altitude2=altitude2)
+        else:
+            self.traj_arr = pattern_array
+            wait = 1
+
+        while not self.is_shutdown():
+
+            if wait_for_start == 1:
+                while(self.isatpos(self.traj_arr[0][0],self.traj_arr[0][1],self.traj_arr[0][2],tolerance) != 1):
+                    print("Waiting for drone to go to", [self.traj_arr[0][0],self.traj_arr[0][1],self.traj_arr[0][2]])
+                    self.gotopos(self.traj_arr[0][0],self.traj_arr[0][1],self.traj_arr[0][2])
+                    self.rate.sleep()
+                wait_for_start = 0
+
+            # Send trajectory and sleep
+            if wait==0:
+                for pos in self.traj_arr:
+                    print(pos, self.lapcounter)
+                    self.gotopos(pos[0],pos[1],pos[2])
+                    self.velocity_pub.publish(velocity)
+                    self.rate.sleep()
+            else:
+                for pos in self.traj_arr:
+                    print(pos, self.lapcounter)
+                    # Interrupts sending of new waypoints in for loop by publishing the same point until reached
+                    while(self.isatpos(pos[0],pos[1],pos[2],tolerance) != 1):
+                        self.gotopos(pos[0],pos[1],pos[2])
+                        self.rate.sleep()
+
+            
+
+    # Generate trajectories
+    def generatetrajectory(self, shape, radius, velocity=0, x_offset=-radius/2, y_offset=-radius/2, altitude=1,altitude2=1, resolution=0.1):
+
+        # Assume current position is the center, plan trajectory around center(NOT YET IMPLEMENTED, ASSUME VIO INITALISATION AT ORIGIN)
+        x=self.drone_position.pose.pose.position.x
+        y=self.drone_position.pose.pose.position.y
+        z=self.drone_position.pose.pose.position.z
+
+        # Velocity and position based controls
+        if velocity != 0:
+        # These trajectories "forces a velocity" by account for the publishing rate of the node and the current speed (quite jank)
+
+            # This method creates a circle of constant eucalidean velocity by varying the radius given the desired velocity, the polling rate, and the baseline radius
+            if shape=="Circle":
+                print("Velocity Circle")
+                total_time_taken=2*math.pi*radius/velocity # find the time taken each lap
+                no_of_waypoints=int(round(total_time_taken*rate)) # find the number of waypoints per loop and round it to the nearest whole number
+
+                # After getting the total number of waypoints, recompute the new radius by inverting the formula
+                # This helps the drone to complete the trajectory in a discrete number of rate steps
+                total_time_taken=no_of_waypoints/float(rate)
+                radius=total_time_taken*velocity/(2*math.pi)
+                self.get_logger("New radius is. %s", radius)
+
+                self.get_logger("Total number of waypoints: %s", no_of_waypoints)
+
+                #Generate Trajectory
+                return [(math.cos(2*math.pi/no_of_waypoints*x)*radius,math.sin(2*math.pi/no_of_waypoints*x)*radius,altitude) for x in range(0,no_of_waypoints+1)]
+            
+            # This method creates a square with radius rounded to the nearest multiple of rate to ensure corners are sharp
+            # Still gives alot of resolution, ie 10hz allows up to 0.1m accuracy
+            elif shape=="Square":
+                print("Velocity Square")
+                time_taken=float(radius)/float(velocity) # dont caculate for total perimeter(all 4 sides), caculate each side independently to ensure corner waypoints are sharp
+                no_of_waypoints=round(time_taken*rate) # no of waypoints per side
+
+                time_taken=no_of_waypoints/float(rate)
+                radius=time_taken*velocity
+                self.get_logger("New radius is. %s", radius)
+
+                self.get_logger("Total number of waypoints: %s", no_of_waypoints)
+            
+                temparr=[]
+                for i in np.arange(0, radius, radius/no_of_waypoints):
+                    temparr.append([i+x_offset, y_offset, altitude])
+                for i in np.arange(0, radius, radius/no_of_waypoints):
+                    temparr.append([radius+x_offset, i+y_offset, altitude])
+                for i in np.arange(0, radius, radius/no_of_waypoints):
+                    temparr.append([radius-i+x_offset, radius+y_offset, altitude])
+                for i in np.arange(0, radius, radius/no_of_waypoints):
+                    temparr.append([x_offset, radius-i+y_offset, altitude])
+                return temparr
+
+            # Square with 2 different altitudes
+            # the z velocity is not controlled but spread evenly based on the number of waypoints, where a2 and a1 are the different altitudes
+            #  *    x     (A1)     (A2)
+            #  *    ^     2-------3       
+            #  *    |    /       /      
+            #  *    |   /       /         
+            #  *    |  1-------4          
+            #  *    +-------------->y
+            elif shape=="Inclined Square":
+                print("Inclined Velocity Square")
+                time_taken=float(radius)/float(velocity) # dont caculate for total perimeter(all 4 sides), caculate each side independently to ensure corner waypoints are sharp
+                no_of_waypoints=round(time_taken*rate) # no of waypoints per side
+
+                time_taken=no_of_waypoints/float(rate)
+                radius=time_taken*velocity
+                self.get_logger("New radius is. %s", radius)
+
+                z_scaling=radius/no_of_waypoints*(altitude2-altitude)
+
+                self.get_logger("Total number of waypoints: %s", no_of_waypoints)
+
+                temparr=[]
+                for i in np.arange(0, radius, radius/no_of_waypoints):
+                    temparr.append([i+x_offset, y_offset, altitude])
+
+                for i in np.arange(0, radius, radius/no_of_waypoints):
+                    temparr.append([radius+x_offset, i+y_offset, altitude+z_scaling*i])
+
+                for i in np.arange(0, radius, radius/no_of_waypoints):
+                    temparr.append([radius-i+x_offset, radius+y_offset, altitude2])
+
+                for i in np.arange(0, radius, radius/no_of_waypoints):
+                    temparr.append([x_offset, radius-i+y_offset, altitude2-z_scaling*i])
+                return temparr
+
+            elif shape=="Line":
+                print("Line")
+                time_taken=float(radius)/float(velocity) # dont caculate for total perimeter(all 4 sides), caculate each side independently to ensure corner waypoints are sharp
+                no_of_waypoints=round(time_taken*rate) # no of waypoints per side
+
+                time_taken=no_of_waypoints/float(rate)
+                radius=time_taken*velocity
+                self.get_logger("New radius is. %s", radius)
+
+                self.get_logger("Total number of waypoints: %s", no_of_waypoints)
+            
+                temparr=[]
+                for i in np.arange(0, radius, radius/no_of_waypoints):
+                    temparr.append([0, i+y_offset, altitude])
+                for i in np.arange(0, radius, radius/no_of_waypoints):
+                    temparr.append([0, radius-i+y_offset, altitude])
+                return temparr
+
+            # Caculate the speed via the time needed to reach each setpoint
+            elif shape=="Pattern":
+                print("Pattern")
+
+                # # Remake the array to ensure each waypoint is rounded to the velocity
+                # new_arr=[]
+                # for i in range(1, len(pattern_array)):
+                #     x=pattern_array[i]-pattern_array[i-1]/
+                #     new_arr.append([pattern_array[i]])
+                #     print(pattern_array[i]-)
+
+                
+
+                # # Express interpolation between points to generate intermediate points in a parametric formula
+                # x = x1 + (x2-x1) * timestep
+                # y = y1 + (y2-y1) * timestep    
+                
+                # # Breakup waypoints into shorter waypoints
+                # path_array=[]
+                # # Run through every point to the next point
+                # for i in range(0,len(pattern_array)):
+                #     distance = len(pattern_array)
+                #     no_of_waypoints=round(float(distance)/float(velocity)*rate) # no of waypoints per side
+                #     # Caculate all the subwaypoints between the main waypoints
+                #     for wp in range(0,len):
+
+            # This is caculated similiar to the shape of the circle with the formula
+            # x = sin(t), y = sin(t) * cos(t) ; this doesnt generate the nicest figure of 8 but it significantly simplifies the code and allows it to share the circle code
+            # TODO, figure out speed settings
+            # other formulas : x = sin(t), y = -sin(t)
+            elif shape=="Figure8":
+                radius = radius/4
+                print("Figure 8")
+                total_time_taken=4*math.pi*radius/velocity # find the time taken each lap
+                no_of_waypoints=int(round(total_time_taken*rate)) # find the number of waypoints per loop and round it to the nearest whole number
+
+                # After getting the total number of waypoints, recompute the new radius by inverting the formula
+                # This helps the drone to complete the trajectory in a discrete number of rate steps
+                total_time_taken=no_of_waypoints/float(rate)
+                radius=total_time_taken*velocity/(2*math.pi)
+                self.get_logger("New radius is. %s", radius)
+
+                self.get_logger("Total number of waypoints: %s", no_of_waypoints)
+
+                #Generate Trajectory
+                return [(math.sin(2*math.pi/no_of_waypoints*x)*radius,math.sin(2*math.pi/no_of_waypoints*x)*math.cos(2*math.pi/no_of_waypoints*x)*radius,altitude) for x in range(0,no_of_waypoints+1)]
+
+            else:
+                print("Invalid Shape")
+                self.signal_shutdown("Invalid Shape")
+
+            
+
+        else:
+            # Position based trajectories
+
+            # Draw a circle, where n is the resolution and also controls the speed
+            if shape=="Circle":
+                print("Position Circle")
+                n=50
+                return [(math.cos(2*math.pi/n*x)*radius,math.sin(2*math.pi/n*x)*radius,altitude) for x in range(0,n+1)]
+
+            # Draw a square of radius,radius assuming it is currently at 0,0
+            elif shape=="Square":
+                temparr=[]
+                for i in np.arange(0, radius, resolution):
+                    temparr.append([i+x_offset, y_offset, altitude])
+                for i in np.arange(0, radius, resolution):
+                    temparr.append([radius+x_offset, i+y_offset, altitude])
+                for i in np.arange(0, radius, resolution):
+                    temparr.append([radius-i+x_offset, radius+y_offset, altitude])
+                for i in np.arange(0, radius, resolution):
+                    temparr.append([x_offset, radius-i+y_offset, altitude])
+                return temparr
+
+            else:
+                print("Invalid Shape")
+                self.signal_shutdown("Invalid Shape")
+
+    # Go to position, supports velocity setpoints too
+    def gotopos(self, x, y, z, velocity=0):
+
+        # No velocity defined, defaulting to position control
+        if(velocity==0):
+            # print("PUBLISHING POSE")
+            posetemp = PoseStamped()
+            posetemp.pose.position.x = x # offboard mode requires existing position setpoints to boot into
+            posetemp.pose.position.y = y
+            posetemp.pose.position.z = z
+            self.local_pos_pub.publish(posetemp)
+
+        # Send velocity and position
+        else:
+            msg0 = PositionTarget()
+            msg0.type_mask = 64
+            msg0.position.x = x
+            msg0.position.y = y
+            msg0.position.z = z
+            msg0.velocity.x= velocity
+            msg0.velocity.y= velocity
+            msg0.velocity.z= z_vel
+            msg0.coordinate_frame = 1
+            self.local_vel_pub.publish(msg0)
+            self.velocity_pub.publish(velocity) # Additional publisher for just the velocity for research purposes
+
+    # Check if drone is at position before sending new position for position mode
+    def isatpos(self, x, y, z, tolerance=0.1):
+        if(math.sqrt((self.drone_position.pose.pose.position.x-x)**2+(self.drone_position.pose.pose.position.y-y)**2+(self.drone_position.pose.pose.position.z-z)**2)<tolerance):
+            return 1
+        else:
+            return 0
+
+    def positioncallback(self,data): # callback invoked with the message as the first arg
+        self.drone_position = data
+
+        
+
+if __name__ == '__main__':
+    
+    rclpy.init()
+
+    basic_position_publisher = drone()
+
+    rclpy.spin(basic_position_publisher)
+
+    # Destroy the node explicitly
+    # (optional - otherwise it will be done automatically
+    # when the garbage collector destroys the node object)
+    basic_position_publisher.destroy_node()
+    rclpy.shutdown()
