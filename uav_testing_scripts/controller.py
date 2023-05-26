@@ -16,13 +16,15 @@ import rclpy
 from rclpy.node import Node
 
 from geometry_msgs.msg import PoseStamped
-from std_msgs.msg import String
+from std_msgs.msg import String, Int32
 import numpy as np
+from transforms3d import quaternions,euler
+from math import degrees, radians
 
-# For alignment of camera_frame to drone_frame(CG)
-bodywidth_x =0
-bodywidth_y =0
-bodywidth_z =0
+# For alignment of camera_frame to drone_frame(CG), in m
+cameratobody_x =0.1 # +ve is forward
+cameratobody_y =0 # +ve is left
+cameratobody_z =0 # +ve is up 
 
 # Camera Topic for desired setpoint
 camera_setpoint_topic="/camera_setpoint"
@@ -30,6 +32,9 @@ camera_setpoint_topic="/camera_setpoint"
 # Setpoint Topic to publish to
 setpoint_topic="/mavros/setpoint_position/local"
 local_position_topic="/mavros/local_position/pose"
+
+# Rear Thruster Topic
+thruster_output_topic="/thruster/pwm"
 
 # Update rate
 rate = 1/10 #10 times every second
@@ -59,6 +64,7 @@ class AlignmentController(Node):
 
         self.setpoint_publisher_ = self.create_publisher(PoseStamped, setpoint_topic, 10)
         # self.rate = self.create_timer(rate, self.timer_callback)
+        self.thruster_publisher_ = self.create_publisher(PoseStamped, thruster_output_topic, 10)
 
         # Controller variables
         self.kp_x = 0.5
@@ -76,30 +82,52 @@ class AlignmentController(Node):
 
     def local_position_listener_callback(self, msg):
         self.local_setpoint = msg
-        # self.eul_deg=rad2deg(quat2eul(rb(i).Quaternion,"XYZ"))
-        # self.eul_rad= quat2eul(rb(i).Quaternion,"XYZ")
-        self.caculate_offset(self.camera_setpoint,self.local_position) # caculate for a new controller input everytime the UAV moves
 
+        # if self.camera_setpoint.pose.position.z != 0:
+        #     self.controller(self.camera_setpoint,self.local_position) # caculate for a new controller input everytime the UAV moves
+        # else:
+        #     print("Zero-z setpoint rejected")
+        self.controller(self.camera_setpoint,self.local_position)
+
+    # Called only for debugging
     def timer_callback(self):
         msg = PoseStamped()
         # msg.data = 'Hello World: %d' % "a"
         # self.publisher_.publish(msg)
         # self.get_logger().info('Publishing: "%s"' % msg.data)
-        msg.pose.position.x= 0
-        msg.pose.position.y= 0
-        msg.pose.position.z= 0
-        msg.pose.orientation.w = 1
-        self.setpoint_publisher_.publish(msg)
+        msg.pose.position.x= 0.0
+        msg.pose.position.y= 0.0
+        msg.pose.position.z= 1.2
+        msg.pose.orientation.z = -0.88
+        msg.pose.orientation.w = -0.468
+        # self.setpoint_publisher_.publish(msg)
 
-    def caculate_offset(self, setpoint, current):
+    def controller(self, setpoint, current):
+
+        current_yaw=euler.quat2euler([current.pose.orientation.w,current.pose.orientation.x,current.pose.orientation.y,current.pose.orientation.z]) #wxyz default
+        setpoint_yaw=euler.quat2euler([setpoint.pose.orientation.w,setpoint.pose.orientation.x,setpoint.pose.orientation.y,setpoint.pose.orientation.z]) #wxyz default
+
+        #Perform transformation of camera setpoint wrt to body
+        self.setpoint.pose.position.x=self.setpoint.pose.position.x-cameratobody_x
+        self.setpoint.pose.position.y=self.setpoint.pose.position.x-cameratobody_y
+        self.setpoint.pose.position.z=self.setpoint.pose.position.x-cameratobody_z
+
+        #Jog the UAV towards the setpoint
+        if abs(self.setpoint.pose.position.x - self.current.pose.position.x) < 0.2 and abs(self.setpoint.pose.position.y-self.current.pose.position.y) < 0.2 and degrees(abs(setpoint_yaw[2]-current_yaw[2])) < 10:
+            self.thruster_publisher_.publish(10) # Change to output PWM
+        #Else, move towards setpoint with controller
+        else:
+            self.alignment_controller(self.camera_setpoint,self.local_position)
+
+    def alignment_controller(self, setpoint, current):
         # Error = Setpoint - Feedback
         self.error = np.subtract(np.array([setpoint.pose.position.x, setpoint.pose.position.y, setpoint.pose.position.z]),np.array([current.pose.position.x, current.pose.position.y, current.pose.position.z]) )
         # Derivative error = Error - error_past
         self.derivative_error = self.error - self.error_past
 
-        input_z = (self.kp_z * self.error[2] * 1) + (self.kd_z * self.derivative_error[2])
         input_x = ((self.kp_x * self.error[0] * 1) + (self.kd_x * self.derivative_error[0]))
         input_y = ((self.kp_y * self.error[1] * 1) + (self.kd_y * self.derivative_error[1]))
+        input_z = (self.kp_z * self.error[2] * 1) + (self.kd_z * self.derivative_error[2])
 
         msg = PoseStamped()
         msg.pose.position.x= input_x
@@ -107,7 +135,6 @@ class AlignmentController(Node):
         msg.pose.position.z= input_z
         msg.pose.orientation.w = 1
         self.setpoint_publisher_.publish(msg)
-
 
         self.error_past = self.error
         
