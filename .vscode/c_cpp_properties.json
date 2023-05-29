@@ -1,0 +1,28 @@
+{
+  "configurations": [
+    {
+      "browse": {
+        "databaseFilename": "${default}",
+        "limitSymbolsToIncludedHeaders": false
+      },
+      "includePath": [
+        "/home/kw/ros2_ws/install/mavros_extras/include/**",
+        "/home/kw/ros2_ws/install/mavros/include/**",
+        "/home/kw/ros2_ws/install/mavros_msgs/include/**",
+        "/home/kw/ros2_ws/install/libmavconn/include/**",
+        "/opt/ros/foxy/include/**",
+        "/home/kw/ros2_ws/src/mavros/libmavconn/include/**",
+        "/home/kw/ros2_ws/src/mavros/mavros/include/**",
+        "/home/kw/ros2_ws/src/mavros/mavros_extras/include/**",
+        "/home/kw/ros2_ws/src/mavros/mavros_msgs/include/**",
+        "/usr/include/**"
+      ],
+      "name": "ROS",
+      "intelliSenseMode": "gcc-x64",
+      "compilerPath": "/usr/bin/gcc",
+      "cStandard": "gnu11",
+      "cppStandard": "c++14"
+    }
+  ],
+  "version": 4
+}

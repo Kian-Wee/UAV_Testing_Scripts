@@ -1,0 +1,17 @@
+{
+    "ros.distro": "foxy",
+    "python.autoComplete.extraPaths": [
+        "/home/kw/ros2_ws/install/uav_testing_scripts/lib/python3.8/site-packages",
+        "/home/kw/ros2_ws/install/tf_transformations/lib/python3.8/site-packages",
+        "/home/kw/ros2_ws/install/mavros/lib/python3.8/site-packages",
+        "/home/kw/ros2_ws/install/mavros_msgs/lib/python3.8/site-packages",
+        "/opt/ros/foxy/lib/python3.8/site-packages"
+    ],
+    "python.analysis.extraPaths": [
+        "/home/kw/ros2_ws/install/uav_testing_scripts/lib/python3.8/site-packages",
+        "/home/kw/ros2_ws/install/tf_transformations/lib/python3.8/site-packages",
+        "/home/kw/ros2_ws/install/mavros/lib/python3.8/site-packages",
+        "/home/kw/ros2_ws/install/mavros_msgs/lib/python3.8/site-packages",
+        "/opt/ros/foxy/lib/python3.8/site-packages"
+    ]
+}

@@ -14,6 +14,7 @@
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 
 from geometry_msgs.msg import PoseStamped
 from std_msgs.msg import String, Int32
@@ -43,6 +44,13 @@ class AlignmentController(Node):
 
     def __init__(self):
         super().__init__('alignment_controller')
+        print("Initalising Controller")
+
+        mavros_qos_profile = QoSProfile(
+            reliability=QoSReliabilityPolicy.RMW_QOS_POLICY_RELIABILITY_BEST_EFFORT,
+            history=QoSHistoryPolicy.RMW_QOS_POLICY_HISTORY_KEEP_LAST,
+            depth=1
+        )
 
         self.camera_setpoint = PoseStamped()
         self.subscription = self.create_subscription(
@@ -57,14 +65,14 @@ class AlignmentController(Node):
             PoseStamped,
             local_position_topic,
             self.local_position_listener_callback,
-            10)
+            qos_profile=mavros_qos_profile)
         self.local_position_subscription  # prevent unused variable warning
         self.eul_deg=np.array([0,0,0])
         self.rad_deg=np.array([0,0,0,0])
 
         self.setpoint_publisher_ = self.create_publisher(PoseStamped, setpoint_topic, 10)
         # self.rate = self.create_timer(rate, self.timer_callback)
-        self.thruster_publisher_ = self.create_publisher(PoseStamped, thruster_output_topic, 10)
+        self.thruster_publisher_ = self.create_publisher(Int32, thruster_output_topic, 10)
 
         # Controller variables
         self.kp_x = 0.5
@@ -76,17 +84,22 @@ class AlignmentController(Node):
         self.error_past = np.array([0,0,0])
         self.feedback = np.array([self.local_position.pose.position.x, self.local_position.pose.position.y, self.local_position.pose.position.z]) # FOR REFERENCE ONLY, DELETE LATER
 
+        print("Finish initalising Controller")
+
+
     def camera_listener_callback(self, msg):
+        print("New Camera setpoint(x:"+str(msg.pose.position.x)+", y:"+str(msg.pose.position.y)+", z:"+str(msg.pose.position.z)+")")
         # self.get_logger().info('I heard: "%s"' % msg.data)
         self.camera_setpoint = msg
 
     def local_position_listener_callback(self, msg):
-        self.local_setpoint = msg
+        self.local_position = msg
 
         # if self.camera_setpoint.pose.position.z != 0:
         #     self.controller(self.camera_setpoint,self.local_position) # caculate for a new controller input everytime the UAV moves
         # else:
         #     print("Zero-z setpoint rejected")
+
         self.controller(self.camera_setpoint,self.local_position)
 
     # Called only for debugging
@@ -108,15 +121,22 @@ class AlignmentController(Node):
         setpoint_yaw=euler.quat2euler([setpoint.pose.orientation.w,setpoint.pose.orientation.x,setpoint.pose.orientation.y,setpoint.pose.orientation.z]) #wxyz default
 
         #Perform transformation of camera setpoint wrt to body
-        self.setpoint.pose.position.x=self.setpoint.pose.position.x-cameratobody_x
-        self.setpoint.pose.position.y=self.setpoint.pose.position.x-cameratobody_y
-        self.setpoint.pose.position.z=self.setpoint.pose.position.x-cameratobody_z
+        setpoint.pose.position.x=setpoint.pose.position.x-cameratobody_x
+        setpoint.pose.position.y=setpoint.pose.position.x-cameratobody_y
+        setpoint.pose.position.z=setpoint.pose.position.x-cameratobody_z
 
         #Jog the UAV towards the setpoint
-        if abs(self.setpoint.pose.position.x - self.current.pose.position.x) < 0.2 and abs(self.setpoint.pose.position.y-self.current.pose.position.y) < 0.2 and degrees(abs(setpoint_yaw[2]-current_yaw[2])) < 10:
-            self.thruster_publisher_.publish(10) # Change to output PWM
+        if abs(setpoint.pose.position.x - current.pose.position.x) < 0.2 and abs(setpoint.pose.position.y-current.pose.position.y) < 0.2 and abs(setpoint.pose.position.z-current.pose.position.z) < 0.2 and degrees(abs(setpoint_yaw[2]-current_yaw[2])) < 10:
+            print(self.local_position.pose.position.x)
+            print(str(abs(setpoint.pose.position.x - current.pose.position.x)))
+            print(str(abs(setpoint.pose.position.y - current.pose.position.y) ))
+            print("CLOSE")
+            # self.thruster_publisher_.publish(10) # Change to output PWM
         #Else, move towards setpoint with controller
         else:
+            print("FAR")
+            pass
+
             self.alignment_controller(self.camera_setpoint,self.local_position)
 
     def alignment_controller(self, setpoint, current):
@@ -133,7 +153,7 @@ class AlignmentController(Node):
         msg.pose.position.x= input_x
         msg.pose.position.y= input_y
         msg.pose.position.z= input_z
-        msg.pose.orientation.w = 1
+        msg.pose.orientation.w = 1.0
         self.setpoint_publisher_.publish(msg)
 
         self.error_past = self.error
